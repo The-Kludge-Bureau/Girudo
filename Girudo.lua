@@ -24,6 +24,15 @@ function ns.ShowPage(index)
   if ns.Girudo and ns.Girudo.UpdateHeader then
     ns.Girudo:UpdateHeader()
   end
+  -- NEW: refresh the log when its tab is opened.
+  if index == 1 and ns.Girudo then
+    if ns.Girudo.ScanGuildLog then
+      ns.Girudo:ScanGuildLog()
+    end
+    if ns.Girudo.RefreshGuildLog then
+      ns.Girudo:RefreshGuildLog()
+    end
+  end
 end
 
 -- ===========================================================================
@@ -40,6 +49,14 @@ GirudoDB.position = GirudoDB.position
 local stored = GirudoDB.showOffline
 GirudoDB.showOffline = (stored == true) or (stored == 1)
 
+GirudoDB.logEntries = GirudoDB.logEntries or {}
+GirudoDB.playerCache = GirudoDB.playerCache or {}
+-- Rank structure derived from the current roster. Used to compute the
+-- "old rank" for promote / demote events without having to have cached
+-- that specific player's previous rank.
+Girudo.rankByIndex = {}
+Girudo.indexByRank = {}
+
 -- ===========================================================================
 -- 3. Constants
 -- ===========================================================================
@@ -49,6 +66,10 @@ local ROW_HEIGHT = 14
 local NUM_ROWS = 28
 local SCROLLBAR_PAD = 25
 local ICON_SIZE = 12
+local LOG_FILTER_WIDTH = 170
+local LOG_FILTER_GAP = 10
+local LOG_FILTER_RIGHT_MARGIN = 5
+local LOG_RIGHT_OFFSET = SCROLLBAR_PAD + LOG_FILTER_WIDTH + LOG_FILTER_GAP
 
 local TAB_NAMES = { "Log", "GB Log", "Roster", "Alts", "Macros", "Ranks", "Settings" }
 
@@ -366,10 +387,168 @@ statusBar:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, 12)
 statusBar:SetHeight(20)
 
 local warningText = statusBar:CreateFontString("GirudoStatusBarText", "OVERLAY", "GameFontNormal")
-warningText:SetAllPoints(statusBar)
+warningText:SetPoint("TOPLEFT", statusBar, "TOPLEFT", 0, 0)
+warningText:SetPoint("BOTTOMRIGHT", statusBar, "BOTTOMRIGHT", -90, 0)
 warningText:SetJustifyH("CENTER")
 warningText:SetTextColor(1, 0.2, 0.2)
 warningText:Hide()
+
+local clearLogButton = CreateFrame("Button", "GirudoClearLogButton", statusBar, "UIPanelButtonTemplate")
+clearLogButton:SetSize(80, 20)
+clearLogButton:SetPoint("RIGHT", statusBar, "RIGHT", 0, 0)
+clearLogButton:SetText("Clear Log")
+clearLogButton:Hide()
+clearLogButton:SetScript("OnClick", function()
+  GirudoDB.logEntries = {}
+  Girudo:UpdateLogDisplay()
+end)
+
+-- ===========================================================================
+-- 7b. Log page (tab 1)
+-- ===========================================================================
+local logPage = ns.pages[1]
+
+-- Search / filter box
+local logSearchBox = CreateFrame("EditBox", "GirudoLogSearchBox", logPage, "InputBoxTemplate")
+logSearchBox:SetSize(300, 20)
+logSearchBox:SetPoint("TOPLEFT", logPage, "TOPLEFT", 8, 0)
+logSearchBox:SetAutoFocus(false)
+logSearchBox:SetMaxLetters(60)
+logSearchBox:SetTextInsets(4, 4, 0, 0)
+
+local logSearchPlaceholder =
+  logSearchBox:CreateFontString("GirudoLogSearchBoxPlaceholder", "OVERLAY", "GameFontDisableSmall")
+logSearchPlaceholder:SetPoint("LEFT", logSearchBox, "LEFT", 6, 0)
+logSearchPlaceholder:SetText("Search log entries...")
+logSearchBox.placeholder = logSearchPlaceholder
+
+logSearchBox:SetScript("OnEditFocusGained", function(self)
+  self.placeholder:Hide()
+end)
+logSearchBox:SetScript("OnEditFocusLost", function(self)
+  if self:GetText() == "" then
+    self.placeholder:Show()
+  end
+end)
+logSearchBox:SetScript("OnTextChanged", function(self)
+  if self:GetText() == "" and not self:HasFocus() then
+    self.placeholder:Show()
+  else
+    self.placeholder:Hide()
+  end
+  local sb = _G["GirudoLogScrollScrollBar"]
+  if sb then
+    sb:SetValue(0)
+  end
+  Girudo:UpdateLogDisplay()
+end)
+logSearchBox:SetScript("OnEscapePressed", function(self)
+  self:ClearFocus()
+end)
+logSearchBox:SetScript("OnEnterPressed", function(self)
+  self:ClearFocus()
+end)
+
+-- Header
+local logHeader = CreateFrame("Frame", "GirudoLogHeader", logPage)
+logHeader:SetPoint("TOPLEFT", logPage, "TOPLEFT", 0, -26)
+logHeader:SetPoint("TOPRIGHT", logPage, "TOPRIGHT", -LOG_RIGHT_OFFSET, -26)
+logHeader:SetHeight(24)
+logHeader:SetBackdrop({
+  bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+  edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+  tile = true,
+  tileSize = 16,
+  edgeSize = 16,
+  insets = { left = 4, right = 4, top = 4, bottom = 4 },
+})
+logHeader:SetBackdropColor(0.1, 0.1, 0.1, 0.8)
+
+local LOG_COLUMNS = {
+  { key = "date", label = "Date", width = 140, align = "LEFT" },
+  { key = "action", label = "Action", width = 110, align = "LEFT" },
+  { key = "details", label = "Details", width = 495, align = "LEFT" },
+}
+
+local logHeaderButtons = {}
+local logX = 0
+for _, col in ipairs(LOG_COLUMNS) do
+  local cap = col.key:sub(1, 1):upper() .. col.key:sub(2)
+  local btn = CreateFrame("Button", "GirudoLogHeader" .. cap, logHeader)
+  btn:SetWidth(col.width)
+  btn:SetHeight(24)
+  local textOffset = (logX == 0) and 4 or 0
+  btn:SetPoint("LEFT", logHeader, "LEFT", logX + textOffset, 0)
+  btn:SetNormalFontObject("GameFontNormalSmall")
+  btn:SetHighlightFontObject("GameFontHighlightSmall")
+  btn:SetText(col.label)
+  btn.colKey = col.key
+  btn:SetScript("OnClick", function()
+    Girudo:SetLogSort(col.key)
+  end)
+
+  local arrow = btn:CreateFontString("GirudoLogHeader" .. cap .. "Arrow", "OVERLAY", "GameFontHighlightSmall")
+  arrow:SetPoint("RIGHT", btn, "RIGHT", -2, 0)
+  arrow:SetText("")
+  btn.arrow = arrow
+
+  logHeaderButtons[col.key] = btn
+  logX = logX + col.width
+end
+
+-- Bordered container behind the rows
+local logListContainer = CreateFrame("Frame", "GirudoLogList", logPage)
+logListContainer:SetPoint("TOPLEFT", logPage, "TOPLEFT", 0, -52)
+logListContainer:SetPoint("BOTTOMRIGHT", logPage, "BOTTOMRIGHT", -LOG_RIGHT_OFFSET, 0)
+logListContainer:SetBackdrop({
+  bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+  edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+  tile = true,
+  tileSize = 16,
+  edgeSize = 16,
+  insets = { left = 4, right = 4, top = 4, bottom = 4 },
+})
+logListContainer:SetBackdropColor(0.1, 0.1, 0.1, 0.8)
+
+-- Scroll frame
+local logScrollFrame = CreateFrame("ScrollFrame", "GirudoLogScroll", logPage, "FauxScrollFrameTemplate")
+logScrollFrame:SetPoint("TOPLEFT", logPage, "TOPLEFT", 0, -56)
+logScrollFrame:SetPoint("BOTTOMRIGHT", logPage, "BOTTOMRIGHT", -LOG_RIGHT_OFFSET, 0)
+logScrollFrame:SetScript("OnVerticalScroll", function(self, offset)
+  FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, function()
+    Girudo:UpdateLogDisplay()
+  end)
+end)
+
+-- Rows
+local logRows = {}
+for i = 1, NUM_ROWS do
+  local row = CreateFrame("Frame", "GirudoLogRow" .. i, logPage)
+  row:SetHeight(ROW_HEIGHT)
+  row:SetPoint("TOPLEFT", logPage, "TOPLEFT", 0, -56 - (i - 1) * ROW_HEIGHT)
+  row:SetPoint("TOPRIGHT", logPage, "TOPRIGHT", -LOG_RIGHT_OFFSET, -56 - (i - 1) * ROW_HEIGHT)
+
+  if i % 2 == 1 then
+    row:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background" })
+    row:SetBackdropColor(0.2, 0.2, 0.2, 0.25)
+  end
+
+  local cells = {}
+  local x = 0
+  for j, col in ipairs(LOG_COLUMNS) do
+    local cap = col.key:sub(1, 1):upper() .. col.key:sub(2)
+    local fs = row:CreateFontString("GirudoLogRow" .. i .. cap, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetWidth(col.width)
+    fs:SetHeight(ROW_HEIGHT)
+    local textOffset = (x == 0) and 4 or 0
+    fs:SetPoint("LEFT", row, "LEFT", x + textOffset, 0)
+    fs:SetJustifyH(col.align)
+    cells[j] = fs
+    x = x + col.width
+  end
+  row.cells = cells
+  logRows[i] = row
+end
 
 -- ===========================================================================
 -- 8. Data, parsing, sorting
@@ -645,6 +824,12 @@ function Girudo:UpdateHeader()
     onlineCount:Hide()
     displayedCount:Hide()
   end
+
+  if ns.activePage == 1 then
+    clearLogButton:Show()
+  else
+    clearLogButton:Hide()
+  end
 end
 
 -- ===========================================================================
@@ -766,6 +951,26 @@ function Girudo:ScanRoster()
   end
 
   self.rosterData = newData
+
+  GirudoDB.playerCache = GirudoDB.playerCache or {}
+  Girudo.rankByIndex = {}
+  Girudo.indexByRank = {}
+  for _, e in ipairs(newData) do
+    GirudoDB.playerCache[e.name] = {
+      level = e.level,
+      rank = e.rank,
+      rankIndex = e.rankIndex,
+      class = e.class,
+      classFileName = e.classFileName,
+      publicNote = e.note,
+      officerNote = e.officerNote,
+    }
+    if e.rank and e.rank ~= "" then
+      Girudo.rankByIndex[e.rankIndex] = e.rank
+      Girudo.indexByRank[e.rank] = e.rankIndex
+    end
+  end
+
   self:SortRoster()
   self:UpdateRosterDisplay()
 end
@@ -777,6 +982,672 @@ function Girudo:UpdateRoster()
     return
   end
   GuildRoster()
+end
+
+-- ===========================================================================
+-- 8d. Guild log: persistence, scanning, sorting, rendering
+-- ===========================================================================
+
+-- WotLK 3.3.5a event types returned by GetGuildEventInfo (0-based).
+local EVENT_INVITE = 0
+local EVENT_JOIN = 1
+local EVENT_QUIT = 2
+local EVENT_PROMOTE = 3
+local EVENT_DEMOTE = 4
+local EVENT_UNINVITE = 5
+local EVENT_SIGN_ON = 6
+local EVENT_SIGN_OFF = 7
+local EVENT_MOTD = 8
+local EVENT_PUBLIC_NOTE = 100
+local EVENT_OFFICER_NOTE = 101
+
+local ACTION_COLORS = {
+  [EVENT_INVITE] = { 0.35, 0.70, 1.00 }, -- light blue
+  [EVENT_JOIN] = { 0.40, 1.00, 0.40 }, -- green
+  [EVENT_QUIT] = { 1.00, 0.40, 0.40 }, -- red
+  [EVENT_PROMOTE] = { 0.50, 1.00, 0.50 }, -- light green
+  [EVENT_DEMOTE] = { 1.00, 0.60, 0.30 }, -- orange
+  [EVENT_UNINVITE] = { 1.00, 0.20, 0.20 }, -- dark red
+  [EVENT_SIGN_ON] = { 0.80, 0.80, 0.80 }, -- gray
+  [EVENT_SIGN_OFF] = { 0.50, 0.50, 0.50 }, -- darker gray
+  [EVENT_MOTD] = { 1.00, 1.00, 0.50 }, -- yellow
+  [EVENT_PUBLIC_NOTE] = { 0.70, 0.80, 1.00 }, -- pale blue
+  [EVENT_OFFICER_NOTE] = { 0.90, 0.70, 1.00 }, -- pale purple
+}
+
+-- Filter state. Every action is visible by default.
+Girudo.logFilter = Girudo.logFilter or {}
+do
+  local all = {
+    EVENT_INVITE,
+    EVENT_JOIN,
+    EVENT_QUIT,
+    EVENT_PROMOTE,
+    EVENT_DEMOTE,
+    EVENT_UNINVITE,
+    EVENT_MOTD,
+    EVENT_PUBLIC_NOTE,
+    EVENT_OFFICER_NOTE,
+  }
+  for _, t in ipairs(all) do
+    if Girudo.logFilter[t] == nil then
+      Girudo.logFilter[t] = true
+    end
+  end
+end
+
+-- Filter box on the right of the Log page.
+local logFilterBox = CreateFrame("Frame", "GirudoLogFilterBox", logPage)
+logFilterBox:SetPoint("TOPRIGHT", logPage, "TOPRIGHT", -LOG_FILTER_RIGHT_MARGIN, -26)
+logFilterBox:SetPoint("BOTTOMRIGHT", logPage, "BOTTOMRIGHT", -LOG_FILTER_RIGHT_MARGIN, 0)
+logFilterBox:SetWidth(LOG_FILTER_WIDTH)
+logFilterBox:SetBackdrop({
+  bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+  edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+  tile = true,
+  tileSize = 16,
+  edgeSize = 16,
+  insets = { left = 4, right = 4, top = 4, bottom = 4 },
+})
+logFilterBox:SetBackdropColor(0.1, 0.1, 0.1, 0.8)
+
+local logFilterTitle = logFilterBox:CreateFontString("GirudoLogFilterTitle", "OVERLAY", "GameFontNormalSmall")
+logFilterTitle:SetPoint("TOPLEFT", logFilterBox, "TOPLEFT", 8, -8)
+logFilterTitle:SetText("Show Actions")
+
+local logFilterCheckboxes = {}
+local LOG_FILTER_ACTIONS = {
+  { type = EVENT_INVITE, label = "Invited" },
+  { type = EVENT_JOIN, label = "Joined" },
+  { type = EVENT_QUIT, label = "Left" },
+  { type = EVENT_PROMOTE, label = "Promoted" },
+  { type = EVENT_DEMOTE, label = "Demoted" },
+  { type = EVENT_UNINVITE, label = "Kicked" },
+  { type = EVENT_MOTD, label = "MOTD Changed" },
+  { type = EVENT_PUBLIC_NOTE, label = "Public Note" },
+  { type = EVENT_OFFICER_NOTE, label = "Officer Note" },
+}
+
+local filterY = -28
+for _, action in ipairs(LOG_FILTER_ACTIONS) do
+  local cbName = "GirudoLogFilter" .. action.label:gsub("%s+", "")
+  local cb = CreateFrame("CheckButton", cbName, logFilterBox, "UICheckButtonTemplate")
+  cb:SetSize(20, 20)
+  cb:SetPoint("TOPLEFT", logFilterBox, "TOPLEFT", 6, filterY)
+  cb:SetChecked(Girudo.logFilter[action.type] and true or false)
+  cb.eventType = action.type
+
+  local lbl = cb:CreateFontString(cbName .. "Label", "OVERLAY", "GameFontHighlightSmall")
+  lbl:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+  lbl:SetText(action.label)
+
+  cb:SetScript("OnClick", function(self)
+    local checked = self:GetChecked()
+    Girudo.logFilter[self.eventType] = (checked == true) or (checked == 1)
+    Girudo:UpdateLogDisplay()
+  end)
+
+  logFilterCheckboxes[action.type] = cb
+  filterY = filterY - 22
+end
+
+local logFilterAllButton = CreateFrame("Button", "GirudoLogFilterAllButton", logFilterBox, "UIPanelButtonTemplate")
+logFilterAllButton:SetSize(72, 20)
+logFilterAllButton:SetPoint("BOTTOMLEFT", logFilterBox, "BOTTOMLEFT", 8, 8)
+logFilterAllButton:SetText("All")
+logFilterAllButton:SetScript("OnClick", function()
+  for eventType, cb in pairs(logFilterCheckboxes) do
+    cb:SetChecked(true)
+    Girudo.logFilter[eventType] = true
+  end
+  Girudo:UpdateLogDisplay()
+end)
+
+local logFilterNoneButton = CreateFrame("Button", "GirudoLogFilterNoneButton", logFilterBox, "UIPanelButtonTemplate")
+logFilterNoneButton:SetSize(72, 20)
+logFilterNoneButton:SetPoint("BOTTOMRIGHT", logFilterBox, "BOTTOMRIGHT", -8, 8)
+logFilterNoneButton:SetText("None")
+logFilterNoneButton:SetScript("OnClick", function()
+  for eventType, cb in pairs(logFilterCheckboxes) do
+    cb:SetChecked(false)
+    Girudo.logFilter[eventType] = false
+  end
+  Girudo:UpdateLogDisplay()
+end)
+
+Girudo.logSortKey = "date"
+Girudo.logSortAscending = false
+
+local function ActionLabel(eventType)
+  if eventType == EVENT_INVITE then
+    return "Invited"
+  end
+  if eventType == EVENT_JOIN then
+    return "Joined"
+  end
+  if eventType == EVENT_QUIT then
+    return "Left"
+  end
+  if eventType == EVENT_PROMOTE then
+    return "Promoted"
+  end
+  if eventType == EVENT_DEMOTE then
+    return "Demoted"
+  end
+  if eventType == EVENT_UNINVITE then
+    return "Kicked"
+  end
+  if eventType == EVENT_SIGN_ON then
+    return "Signed On"
+  end
+  if eventType == EVENT_SIGN_OFF then
+    return "Signed Off"
+  end
+  if eventType == EVENT_MOTD then
+    return "MOTD Changed"
+  end
+  if eventType == EVENT_PUBLIC_NOTE then
+    return "Public Note"
+  end
+  if eventType == EVENT_OFFICER_NOTE then
+    return "Officer Note"
+  end
+  return "Unknown (" .. tostring(eventType) .. ")"
+end
+
+local function NormalizeEventType(raw)
+  if type(raw) == "number" then
+    return raw
+  end
+  if type(raw) ~= "string" then
+    return nil
+  end
+  local s = raw:lower():gsub("_", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  if s == "invite" or s == "invited" or s == "invitation" then
+    return EVENT_INVITE
+  end
+  if s == "join" or s == "joined" or s == "member joined" then
+    return EVENT_JOIN
+  end
+  if s == "leave" or s == "left" or s == "quit" or s == "member left" then
+    return EVENT_QUIT
+  end
+  if s == "promote" or s == "promoted" or s == "rank up" then
+    return EVENT_PROMOTE
+  end
+  if s == "demote" or s == "demoted" or s == "rank down" then
+    return EVENT_DEMOTE
+  end
+  if s == "uninvite" or s == "uninvited" or s == "remove" or s == "removed" or s == "kick" or s == "kicked" then
+    return EVENT_UNINVITE
+  end
+  if s == "sign on" or s == "signed on" or s == "login" then
+    return EVENT_SIGN_ON
+  end
+  if s == "sign off" or s == "signed off" or s == "logout" then
+    return EVENT_SIGN_OFF
+  end
+  if s == "motd" or s == "motd changed" then
+    return EVENT_MOTD
+  end
+  return nil
+end
+
+-- Two conventions observed:
+--   * Absolute: year >= 1970 and month 1-12 → time({year, month, day, hour})
+--   * Relative: year=0 and month=0 → day=daysAgo, hour=hoursAgo
+local function SafeEventTime(year, month, day, hour, index)
+  if (year or 0) >= 1970 and (month or 0) >= 1 and (month or 0) <= 12 and (day or 0) >= 1 and (day or 0) <= 31 then
+    local t = time({
+      year = year,
+      month = month,
+      day = day,
+      hour = hour or 0,
+      min = 0,
+      sec = 0,
+    })
+    if t then
+      return t
+    end
+  end
+
+  if (year or 0) == 0 and (month or 0) == 0 then
+    local totalHoursAgo = (day or 0) * 24 + (hour or 0)
+    if totalHoursAgo >= 0 and totalHoursAgo < 87600 then
+      return time() - totalHoursAgo * 3600
+    end
+  end
+
+  return time() - ((index or 1) - 1) * 60
+end
+
+-- Class-colored name.
+local function FormatPlayerName(name, cache)
+  if not name or name == "" then
+    return "?"
+  end
+  if cache and cache.classFileName and RAID_CLASS_COLORS[cache.classFileName] then
+    local c = RAID_CLASS_COLORS[cache.classFileName]
+    return string.format("|cff%02x%02x%02x%s|r", c.r * 255, c.g * 255, c.b * 255, name)
+  end
+  return name
+end
+
+local function BuildLogDetails(eventType, name1, name2, rank)
+  local cache1 = name1 and GirudoDB.playerCache[name1]
+  local cache2 = name2 and GirudoDB.playerCache[name2]
+
+  if eventType == EVENT_JOIN then
+    local lvl = (cache1 and cache1.level) or "?"
+    return FormatPlayerName(name1, cache1) .. " (lvl " .. tostring(lvl) .. ") joined the guild"
+  elseif eventType == EVENT_QUIT then
+    local lvl = (cache1 and cache1.level) or "?"
+    local rk = (cache1 and cache1.rank) or "?"
+    return FormatPlayerName(name1, cache1) .. " (lvl " .. tostring(lvl) .. " " .. tostring(rk) .. ") left the guild"
+  elseif eventType == EVENT_PROMOTE or eventType == EVENT_DEMOTE then
+    -- On this server: name1 = the actor (promoter / demoter),
+    --                 name2 = the target (promoted / demoted).
+    local actor = name1 or "?"
+    local target = name2 or "?"
+    local actorCache = cache1
+    local targetCache = cache2
+    local newRank = rank or "?"
+    local oldRank = "?"
+
+    -- Derive the old rank index from the target's cached rankIndex. That
+    -- index is unambiguous even when two ranks share a name.
+    local oldRankIndex
+    if targetCache and targetCache.rankIndex and Girudo.rankByIndex then
+      local cachedIndexName = Girudo.rankByIndex[targetCache.rankIndex]
+      if cachedIndexName == newRank then
+        -- Cache is current: cached rank == new rank. Promote moves toward
+        -- lower indices (0 = GM), demote moves toward higher.
+        if eventType == EVENT_PROMOTE then
+          oldRankIndex = targetCache.rankIndex + 1
+        else
+          oldRankIndex = targetCache.rankIndex - 1
+        end
+      else
+        -- Cache is stale: cached rankIndex is the OLD index already.
+        oldRankIndex = targetCache.rankIndex
+      end
+    else
+      -- No cached rankIndex: fall back to first index matching the new
+      -- rank name. Ambiguous with duplicate names but the best we can do.
+      local fallbackIndex = Girudo.indexByRank and Girudo.indexByRank[newRank]
+      if fallbackIndex then
+        if eventType == EVENT_PROMOTE then
+          oldRankIndex = fallbackIndex + 1
+        else
+          oldRankIndex = fallbackIndex - 1
+        end
+      end
+    end
+
+    if oldRankIndex and Girudo.rankByIndex then
+      local derived = Girudo.rankByIndex[oldRankIndex]
+      if derived and derived ~= "" then
+        oldRank = derived
+      end
+    end
+
+    if oldRank == "?" and targetCache and targetCache.rank and targetCache.rank ~= newRank then
+      oldRank = targetCache.rank
+    end
+
+    local verb = (eventType == EVENT_PROMOTE) and "promoted" or "demoted"
+    return FormatPlayerName(actor, actorCache)
+      .. " "
+      .. verb
+      .. " "
+      .. FormatPlayerName(target, targetCache)
+      .. " from "
+      .. tostring(oldRank)
+      .. " to "
+      .. tostring(newRank)
+  elseif eventType == EVENT_INVITE then
+    local invitee = name2 or "?"
+    local inviter = name1 or "?"
+    return FormatPlayerName(inviter, cache1) .. " invited " .. FormatPlayerName(invitee, cache2)
+  elseif eventType == EVENT_UNINVITE then
+    -- Same convention as promote/demote on this server: name1 = actor,
+    -- name2 = target. So the kicker is name1, the kicked player is name2.
+    local kicker = name1 or "?"
+    local kicked = name2 or "?"
+    local kickerCache = cache1
+    local kickedCache = cache2
+    local lvl = (kickedCache and kickedCache.level) or "?"
+    local rk = (kickedCache and kickedCache.rank) or "?"
+    return FormatPlayerName(kicker, kickerCache)
+      .. " kicked "
+      .. FormatPlayerName(kicked, kickedCache)
+      .. " (lvl "
+      .. tostring(lvl)
+      .. " "
+      .. tostring(rk)
+      .. ") from the guild"
+  elseif eventType == EVENT_SIGN_ON or eventType == EVENT_SIGN_OFF then
+    return FormatPlayerName(name1, cache1)
+  elseif eventType == EVENT_MOTD then
+    return name1 or ""
+  elseif eventType == EVENT_PUBLIC_NOTE or eventType == EVENT_OFFICER_NOTE then
+    local who = name1 or "?"
+    local newNote = name2 or ""
+    local oldNote = "?"
+    if cache1 then
+      local cached
+      if eventType == EVENT_PUBLIC_NOTE then
+        cached = cache1.publicNote
+      else
+        cached = cache1.officerNote
+      end
+      if cached and cached ~= newNote then
+        oldNote = cached
+      end
+    end
+    local changerName = UnitName("player") or "You"
+    local changerCache = GirudoDB.playerCache[changerName]
+    return FormatPlayerName(changerName, changerCache)
+      .. ": "
+      .. FormatPlayerName(who, cache1)
+      .. ' - "'
+      .. tostring(oldNote)
+      .. '" → "'
+      .. tostring(newNote)
+      .. '"'
+  end
+
+  return tostring(name1 or "") .. " " .. tostring(name2 or "")
+end
+
+local function AddLogEntry(entry)
+  local list = GirudoDB.logEntries
+  local key
+  if entry.rawKey then
+    key = entry.rawKey
+  else
+    key = tostring(entry.time) .. "|" .. tostring(entry.eventType) .. "|" .. (entry.detailKey or "")
+  end
+  for i = #list, 1, -1 do
+    local existing = list[i]
+    if existing.key == key then
+      -- Backfill seq for entries recorded before this fix existed.
+      if not existing.seq and entry.seq then
+        existing.seq = entry.seq
+      end
+      return false
+    end
+  end
+  entry.key = key
+  table.insert(list, entry)
+  local MAX_ENTRIES = 2000
+  while #list > MAX_ENTRIES do
+    table.remove(list, 1)
+  end
+  return true
+end
+
+function Girudo:ScanGuildLog()
+  if not IsInGuild() then
+    return
+  end
+  GirudoDB.logEntries = GirudoDB.logEntries or {}
+  GirudoDB.playerCache = GirudoDB.playerCache or {}
+
+  local numEvents = GetNumGuildEvents()
+  if not numEvents or numEvents == 0 then
+    self:UpdateLogDisplay()
+    return
+  end
+
+  local changed = false
+  local scanTime = time()
+  for i = 1, numEvents do
+    local rawType, name1, name2, rank, year, month, day, hour = GetGuildEventInfo(i)
+    local eventType = NormalizeEventType(rawType)
+    -- Skip Signed On / Signed Off entirely. They are not surfaced in the
+    -- filter UI, so logging them would produce entries that cannot be
+    -- hidden by the user.
+    if eventType == EVENT_SIGN_ON or eventType == EVENT_SIGN_OFF then
+      eventType = nil
+    end
+    if eventType then
+      local eventTime = SafeEventTime(year, month, day, hour, i)
+      local detailText = BuildLogDetails(eventType, name1, name2, rank)
+      local rawKey = table.concat({
+        tostring(rawType),
+        tostring(year or 0),
+        tostring(month or 0),
+        tostring(day or 0),
+        tostring(hour or 0),
+        tostring(name1 or ""),
+        tostring(name2 or ""),
+        tostring(rank or ""),
+      }, "|")
+      if
+        AddLogEntry({
+          time = eventTime,
+          eventType = eventType,
+          action = ActionLabel(eventType),
+          details = detailText,
+          detailKey = tostring(name1 or "") .. "|" .. tostring(name2 or ""),
+          rawKey = rawKey,
+          -- Position within the API response. On this server i=1 is the
+          -- OLDEST entry, so the index is added rather than subtracted:
+          -- higher i (newer event) yields a higher seq.
+          seq = scanTime * 10000 + i,
+        })
+      then
+        changed = true
+      end
+    end
+  end
+
+  if changed then
+    table.sort(GirudoDB.logEntries, function(a, b)
+      if a.time == b.time then
+        return (a.eventType or 0) > (b.eventType or 0)
+      end
+      return a.time > b.time
+    end)
+  end
+
+  self:UpdateLogDisplay()
+end
+
+function Girudo:RefreshGuildLog()
+  if IsInGuild() then
+    QueryGuildEventLog()
+  end
+end
+
+local function RecordNoteChange(eventType, index, newNote)
+  if not IsInGuild() then
+    return
+  end
+  GirudoDB.logEntries = GirudoDB.logEntries or {}
+  GirudoDB.playerCache = GirudoDB.playerCache or {}
+  newNote = newNote or ""
+
+  -- Live roster is authoritative: at hook time, GetGuildRosterInfo still
+  -- reflects the pre-change note because the server round-trip has not
+  -- yet landed. Read both note fields in one call.
+  local name, _, _, _, _, _, liveNote, liveOfficerNote = GetGuildRosterInfo(index)
+  if not name then
+    return
+  end
+
+  local oldNote
+  if eventType == EVENT_PUBLIC_NOTE then
+    oldNote = liveNote
+  else
+    oldNote = liveOfficerNote
+  end
+
+  -- If live matched the new note (e.g. the client optimistically updated),
+  -- fall back to the last-scanned cache value.
+  if not oldNote or oldNote == newNote then
+    local cache = GirudoDB.playerCache[name]
+    if cache then
+      local cached
+      if eventType == EVENT_PUBLIC_NOTE then
+        cached = cache.publicNote
+      else
+        cached = cache.officerNote
+      end
+      if cached and cached ~= newNote then
+        oldNote = cached
+      end
+    end
+  end
+
+  local displayOld = (oldNote and oldNote ~= "") and oldNote or "?"
+  local cache = GirudoDB.playerCache[name]
+
+  local changerName = UnitName("player") or "You"
+  local changerCache = GirudoDB.playerCache[changerName]
+  local details = FormatPlayerName(changerName, changerCache)
+    .. ": "
+    .. FormatPlayerName(name, cache)
+    .. ' - "'
+    .. tostring(displayOld)
+    .. '" → "'
+    .. tostring(newNote)
+    .. '"'
+
+  AddLogEntry({
+    time = time(),
+    eventType = eventType,
+    action = ActionLabel(eventType),
+    details = details,
+    detailKey = name .. "|" .. tostring(newNote),
+    rawKey = "note|" .. tostring(eventType) .. "|" .. time() .. "|" .. name .. "|" .. tostring(newNote),
+    seq = time() * 10000,
+  })
+
+  if cache then
+    if eventType == EVENT_PUBLIC_NOTE then
+      cache.publicNote = newNote
+    else
+      cache.officerNote = newNote
+    end
+  end
+  Girudo:UpdateLogDisplay()
+end
+
+pcall(function()
+  hooksecurefunc("GuildRosterSetPublicNote", function(i, n)
+    RecordNoteChange(EVENT_PUBLIC_NOTE, i, n)
+  end)
+end)
+pcall(function()
+  hooksecurefunc("GuildRosterSetOfficerNote", function(i, n)
+    RecordNoteChange(EVENT_OFFICER_NOTE, i, n)
+  end)
+end)
+
+function Girudo:SetLogSort(key)
+  if self.logSortKey == key then
+    self.logSortAscending = not self.logSortAscending
+  else
+    self.logSortKey = key
+    self.logSortAscending = (key ~= "date")
+  end
+  self:UpdateLogDisplay()
+end
+
+local function GetLogSortValue(entry, key)
+  if key == "date" then
+    return entry.time
+  end
+  if key == "action" then
+    return entry.action
+  end
+  if key == "details" then
+    return entry.details
+  end
+  return entry.time
+end
+
+function Girudo:UpdateLogDisplay()
+  GirudoDB.logEntries = GirudoDB.logEntries or {}
+
+  local term = logSearchBox:GetText():lower()
+  local filtered = {}
+
+  for _, e in ipairs(GirudoDB.logEntries) do
+    local passes = true
+
+    -- Action-type filter (checkbox panel).
+    if not Girudo.logFilter[e.eventType] then
+      passes = false
+    end
+
+    -- Text search filter.
+    if passes then
+      local haystack = (e.action or "") .. " " .. (e.details or "")
+      if term ~= "" and not haystack:lower():find(term, 1, true) then
+        passes = false
+      end
+    end
+
+    if passes then
+      table.insert(filtered, e)
+    end
+  end
+
+  local key = self.logSortKey
+  local asc = self.logSortAscending
+  table.sort(filtered, function(a, b)
+    local av = GetLogSortValue(a, key)
+    local bv = GetLogSortValue(b, key)
+    if av == bv then
+      -- Same-value entries: preserve Blizzard's API order (higher seq first,
+      -- because seq=1 is the newest entry in the list).
+      return (a.seq or 0) > (b.seq or 0)
+    end
+    if asc then
+      return av < bv
+    else
+      return av > bv
+    end
+  end)
+
+  for k, btn in pairs(logHeaderButtons) do
+    if k == key then
+      btn.arrow:SetText(asc and "↑" or "↓")
+    else
+      btn.arrow:SetText("")
+    end
+  end
+
+  local numEntries = #filtered
+  FauxScrollFrame_Update(logScrollFrame, numEntries, NUM_ROWS, ROW_HEIGHT)
+  local offset = FauxScrollFrame_GetOffset(logScrollFrame)
+
+  for i = 1, NUM_ROWS do
+    local idx = offset + i
+    local row = logRows[i]
+    if idx <= numEntries then
+      local e = filtered[idx]
+      row.cells[1]:SetText(date("%Y-%m-%d %H:%M", e.time or 0))
+      row.cells[1]:SetTextColor(1, 1, 1)
+
+      row.cells[2]:SetText(e.action or "")
+      local ac = ACTION_COLORS[e.eventType]
+      if ac then
+        row.cells[2]:SetTextColor(ac[1], ac[2], ac[3])
+      else
+        row.cells[2]:SetTextColor(1, 0.82, 0)
+      end
+
+      row.cells[3]:SetText(e.details or "")
+      row.cells[3]:SetTextColor(1, 1, 1)
+      row:Show()
+    else
+      row:Hide()
+    end
+  end
 end
 
 -- ===========================================================================
@@ -832,6 +1703,7 @@ Girudo:RegisterEvent("ADDON_LOADED")
 Girudo:RegisterEvent("PLAYER_ENTERING_WORLD")
 Girudo:RegisterEvent("GUILD_ROSTER_UPDATE")
 Girudo:RegisterEvent("PLAYER_GUILD_UPDATE")
+Girudo:RegisterEvent("GUILD_EVENT_LOG_UPDATE")
 
 Girudo:SetScript("OnEvent", function(self, event, arg1)
   if event == "ADDON_LOADED" and arg1 == "Blizzard_GuildUI" then
@@ -846,8 +1718,14 @@ Girudo:SetScript("OnEvent", function(self, event, arg1)
   elseif event == "GUILD_ROSTER_UPDATE" then
     HookGuildFrame()
     Girudo:ScanRoster()
+    -- If the Log tab is visible, re-merge so note changes appear promptly.
+    if ns.activePage == 1 and Girudo.ScanGuildLog then
+      Girudo:ScanGuildLog()
+    end
   elseif event == "PLAYER_GUILD_UPDATE" then
     Girudo:UpdateHeader()
+  elseif event == "GUILD_EVENT_LOG_UPDATE" then
+    Girudo:ScanGuildLog()
   end
 end)
 
