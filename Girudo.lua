@@ -378,6 +378,21 @@ for i = 1, NUM_ROWS do
     x = x + col.width
   end
   row.cells = cells
+
+  -- Invisible click overlay. Sits above all cell content so a click anywhere
+  -- in the row triggers the member popup, while the underlying fontstrings,
+  -- class icons, and row backdrop continue to render normally.
+  local rowButton = CreateFrame("Button", "GirudoRosterRow" .. i .. "Button", row)
+  rowButton:SetAllPoints(row)
+  rowButton:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+  rowButton:SetScript("OnClick", function(self)
+    local parent = self:GetParent()
+    if parent.entry and parent.entry.name then
+      Girudo:OpenMemberPopup(parent.entry.name)
+    end
+  end)
+  row.button = rowButton
+
   rows[i] = row
 end
 
@@ -890,8 +905,10 @@ function Girudo:UpdateRosterDisplay()
       row.cells[9]:SetText(e.officerNote or "")
       row.cells[9]:SetTextColor(1, 1, 1)
 
+      row.entry = e
       row:Show()
     else
+      row.entry = nil
       row:Hide()
     end
   end
@@ -899,7 +916,393 @@ function Girudo:UpdateRosterDisplay()
   self:UpdateSortArrows()
   self:UpdateWarning()
   self:UpdateHeader()
+  if self.RefreshMemberPopup then
+    self:RefreshMemberPopup()
+  end
 end
+
+-- ===========================================================================
+-- 8d. Member popup
+-- ===========================================================================
+local PADDING = 14
+local POPUP_WIDTH = 320
+local CONTENT_WIDTH = POPUP_WIDTH - PADDING * 2 -- 292
+
+local popup = CreateFrame("Frame", "GirudoMemberPopup", UIParent)
+popup:SetWidth(POPUP_WIDTH)
+popup:SetHeight(385)
+popup:SetPoint("CENTER")
+popup:SetMovable(true)
+popup:SetClampedToScreen(true)
+popup:EnableMouse(true)
+popup:RegisterForDrag("LeftButton")
+popup:SetScript("OnDragStart", popup.StartMoving)
+popup:SetScript("OnDragStop", popup.StopMovingOrSizing)
+popup:SetFrameStrata("FULLSCREEN_DIALOG")
+popup:SetBackdrop({
+  bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+  edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+  tile = true,
+  tileSize = 16,
+  edgeSize = 16,
+  insets = { left = 4, right = 4, top = 4, bottom = 4 },
+})
+popup:SetBackdropColor(0, 0, 0, 0.9)
+popup:Hide()
+tinsert(UISpecialFrames, "GirudoMemberPopup")
+
+local popupClose = CreateFrame("Button", "GirudoMemberPopupCloseButton", popup, "UIPanelCloseButton")
+popupClose:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -4, -4)
+
+local popupName = popup:CreateFontString("GirudoMemberPopupName", "OVERLAY", "GameFontNormalLarge")
+popupName:SetPoint("TOPLEFT", popup, "TOPLEFT", PADDING, -PADDING)
+popupName:SetWidth(CONTENT_WIDTH)
+popupName:SetJustifyH("LEFT")
+
+local popupLevelClass = popup:CreateFontString("GirudoMemberPopupLevelClass", "OVERLAY", "GameFontHighlightSmall")
+popupLevelClass:SetPoint("TOPLEFT", popupName, "BOTTOMLEFT", 0, -4)
+popupLevelClass:SetWidth(CONTENT_WIDTH)
+popupLevelClass:SetJustifyH("LEFT")
+
+local popupRank = popup:CreateFontString("GirudoMemberPopupRank", "OVERLAY", "GameFontHighlightSmall")
+popupRank:SetPoint("TOPLEFT", popupLevelClass, "BOTTOMLEFT", 0, -2)
+popupRank:SetWidth(CONTENT_WIDTH)
+popupRank:SetJustifyH("LEFT")
+
+local popupZone = popup:CreateFontString("GirudoMemberPopupZone", "OVERLAY", "GameFontHighlightSmall")
+popupZone:SetPoint("TOPLEFT", popupRank, "BOTTOMLEFT", 0, -2)
+popupZone:SetWidth(CONTENT_WIDTH)
+popupZone:SetJustifyH("LEFT")
+
+local popupJoined = popup:CreateFontString("GirudoMemberPopupJoined", "OVERLAY", "GameFontHighlightSmall")
+popupJoined:SetPoint("TOPLEFT", popupZone, "BOTTOMLEFT", 0, -2)
+popupJoined:SetWidth(CONTENT_WIDTH)
+popupJoined:SetJustifyH("LEFT")
+
+local popupLastSeen = popup:CreateFontString("GirudoMemberPopupLastSeen", "OVERLAY", "GameFontHighlightSmall")
+popupLastSeen:SetPoint("TOPLEFT", popupJoined, "BOTTOMLEFT", 0, -2)
+popupLastSeen:SetWidth(CONTENT_WIDTH)
+popupLastSeen:SetJustifyH("LEFT")
+
+local popupPublicNoteLabel =
+  popup:CreateFontString("GirudoMemberPopupPublicNoteLabel", "OVERLAY", "GameFontNormalSmall")
+popupPublicNoteLabel:SetPoint("TOPLEFT", popupLastSeen, "BOTTOMLEFT", 0, -10)
+popupPublicNoteLabel:SetText("Public Note")
+
+local popupPublicNoteEdit = CreateFrame("EditBox", "GirudoMemberPopupPublicNoteEdit", popup, "InputBoxTemplate")
+popupPublicNoteEdit:SetSize(CONTENT_WIDTH, 20)
+popupPublicNoteEdit:SetPoint("TOPLEFT", popupPublicNoteLabel, "BOTTOMLEFT", 0, -4)
+popupPublicNoteEdit:SetAutoFocus(false)
+popupPublicNoteEdit:SetMaxLetters(255)
+popupPublicNoteEdit:SetTextInsets(4, 4, 0, 0)
+
+local popupOfficerNoteLabel =
+  popup:CreateFontString("GirudoMemberPopupOfficerNoteLabel", "OVERLAY", "GameFontNormalSmall")
+popupOfficerNoteLabel:SetPoint("TOPLEFT", popupPublicNoteEdit, "BOTTOMLEFT", 0, -8)
+popupOfficerNoteLabel:SetText("Officer Note")
+
+local popupOfficerNoteEdit = CreateFrame("EditBox", "GirudoMemberPopupOfficerNoteEdit", popup, "InputBoxTemplate")
+popupOfficerNoteEdit:SetSize(CONTENT_WIDTH, 20)
+popupOfficerNoteEdit:SetPoint("TOPLEFT", popupOfficerNoteLabel, "BOTTOMLEFT", 0, -4)
+popupOfficerNoteEdit:SetAutoFocus(false)
+popupOfficerNoteEdit:SetMaxLetters(255)
+popupOfficerNoteEdit:SetTextInsets(4, 4, 0, 0)
+
+local popupPromoteBtn = CreateFrame("Button", "GirudoMemberPopupPromote", popup, "UIPanelButtonTemplate")
+popupPromoteBtn:SetSize(92, 22)
+popupPromoteBtn:SetPoint("TOPLEFT", popupOfficerNoteEdit, "BOTTOMLEFT", 0, -10)
+popupPromoteBtn:SetText("Promote")
+
+local popupDemoteBtn = CreateFrame("Button", "GirudoMemberPopupDemote", popup, "UIPanelButtonTemplate")
+popupDemoteBtn:SetSize(92, 22)
+popupDemoteBtn:SetPoint("LEFT", popupPromoteBtn, "RIGHT", 8, 0)
+popupDemoteBtn:SetText("Demote")
+
+local popupWhisperBtn = CreateFrame("Button", "GirudoMemberPopupWhisper", popup, "UIPanelButtonTemplate")
+popupWhisperBtn:SetSize(92, 22)
+popupWhisperBtn:SetPoint("TOPLEFT", popupPromoteBtn, "BOTTOMLEFT", 0, -6)
+popupWhisperBtn:SetText("Whisper")
+
+local popupInviteBtn = CreateFrame("Button", "GirudoMemberPopupInvite", popup, "UIPanelButtonTemplate")
+popupInviteBtn:SetSize(92, 22)
+popupInviteBtn:SetPoint("LEFT", popupWhisperBtn, "RIGHT", 8, 0)
+popupInviteBtn:SetText("Invite")
+
+local popupKickBtn = CreateFrame("Button", "GirudoMemberPopupKick", popup, "UIPanelButtonTemplate")
+popupKickBtn:SetSize(92, 22)
+popupKickBtn:SetPoint("LEFT", popupInviteBtn, "RIGHT", 8, 0)
+popupKickBtn:SetText("Kick")
+
+local popupSeparator = popup:CreateTexture("GirudoMemberPopupSeparator", "ARTWORK")
+popupSeparator:SetHeight(1)
+popupSeparator:SetTexture(0.5, 0.5, 0.5, 0.5)
+popupSeparator:SetPoint("TOPLEFT", popupWhisperBtn, "BOTTOMLEFT", 0, -10)
+popupSeparator:SetPoint("TOPRIGHT", popupWhisperBtn, "BOTTOMRIGHT", 0, -10)
+
+local popupAltsLabel = popup:CreateFontString("GirudoMemberPopupAltsLabel", "OVERLAY", "GameFontNormalSmall")
+popupAltsLabel:SetPoint("TOPLEFT", popupSeparator, "BOTTOMLEFT", 0, -8)
+popupAltsLabel:SetText("Alts")
+
+local popupAltsContainer = CreateFrame("Frame", "GirudoMemberPopupAltsContainer", popup)
+popupAltsContainer:SetPoint("TOPLEFT", popupAltsLabel, "BOTTOMLEFT", 0, -4)
+popupAltsContainer:SetSize(CONTENT_WIDTH, 60)
+
+local popupAltsPlaceholder =
+  popupAltsContainer:CreateFontString("GirudoMemberPopupAltsPlaceholder", "OVERLAY", "GameFontDisableSmall")
+popupAltsPlaceholder:SetPoint("TOPLEFT", popupAltsContainer, "TOPLEFT", 0, 0)
+popupAltsPlaceholder:SetText("No alts configured.")
+
+local function FindRosterIndex(name)
+  local n = GetNumGuildMembers(true)
+  for i = 1, n do
+    local mName = GetGuildRosterInfo(i)
+    if mName == name then
+      return i
+    end
+  end
+  return nil
+end
+
+local function FormatLastSeenAgo(entry)
+  if entry.online == 1 then
+    return "Online"
+  end
+  local hours = entry.lastOnlineValue
+  if not hours or hours < 0 then
+    hours = 0
+  end
+
+  if hours < 1 / 60 then
+    return "just now"
+  elseif hours < 1 then
+    local m = math.floor(hours * 60 + 0.5)
+    if m < 1 then
+      m = 1
+    end
+    return m .. (m == 1 and " minute ago" or " minutes ago")
+  elseif hours < 24 then
+    local h = math.floor(hours)
+    return h .. (h == 1 and " hour ago" or " hours ago")
+  elseif hours < 168 then
+    local d = math.floor(hours / 24)
+    return d .. (d == 1 and " day ago" or " days ago")
+  elseif hours < 720 then
+    local w = math.floor(hours / 168)
+    return w .. (w == 1 and " week ago" or " weeks ago")
+  elseif hours < 8760 then
+    local mo = math.floor(hours / 730)
+    if mo < 1 then
+      mo = 1
+    end
+    return mo .. (mo == 1 and " month ago" or " months ago")
+  else
+    local y = math.floor(hours / 8760)
+    return y .. (y == 1 and " year ago" or " years ago")
+  end
+end
+
+function Girudo:RefreshMemberPopup()
+  if not popup:IsShown() then
+    return
+  end
+  if not popup.currentName then
+    return
+  end
+
+  local entry
+  for _, e in ipairs(self.rosterData) do
+    if e.name == popup.currentName then
+      entry = e
+      break
+    end
+  end
+
+  if not entry then
+    popup:Hide()
+    return
+  end
+
+  local classColor = entry.classFileName and RAID_CLASS_COLORS[entry.classFileName]
+
+  local YELLOW = "|cffffd100"
+  local RESET = "|r"
+
+  popupName:SetText(entry.name)
+  if classColor then
+    popupName:SetTextColor(classColor.r, classColor.g, classColor.b)
+  else
+    popupName:SetTextColor(1, 1, 1)
+  end
+
+  -- Level line: yellow "Level:" label, white level number, class-colored name.
+  local classDisplay = entry.class or "?"
+  if classColor then
+    classDisplay =
+      string.format("|cff%02x%02x%02x%s|r", classColor.r * 255, classColor.g * 255, classColor.b * 255, classDisplay)
+  end
+  popupLevelClass:SetText(YELLOW .. "Level:" .. RESET .. " " .. tostring(entry.level or "?") .. " " .. classDisplay)
+  popupLevelClass:SetTextColor(1, 1, 1)
+
+  popupRank:SetText(YELLOW .. "Rank:" .. RESET .. " " .. (entry.rank or "?"))
+  popupRank:SetTextColor(1, 1, 1)
+
+  popupZone:SetText(YELLOW .. "Zone:" .. RESET .. " " .. (entry.zone or ""))
+  popupZone:SetTextColor(1, 1, 1)
+
+  if entry.joinDate and entry.joinDate ~= "—" and entry.joinDate ~= "" then
+    popupJoined:SetText(YELLOW .. "Joined:" .. RESET .. " " .. (entry.joinDate or "-"))
+  else
+    popupJoined:SetText("")
+  end
+  popupJoined:SetTextColor(1, 1, 1)
+
+  -- Last Seen: yellow label, colored time portion.
+  local lastSeenText = FormatLastSeenAgo(entry)
+  local r, g, b
+  if entry.online == 1 then
+    r, g, b = 0, 1, 0
+  else
+    r, g, b = ColorForOfflineHours(entry.lastOnlineValue)
+  end
+  popupLastSeen:SetText(
+    string.format("%sLast Seen:%s |cff%02x%02x%02x%s|r", YELLOW, RESET, r * 255, g * 255, b * 255, lastSeenText)
+  )
+  popupLastSeen:SetTextColor(1, 1, 1)
+
+  if not popupPublicNoteEdit:HasFocus() then
+    popupPublicNoteEdit:SetText(entry.note or "")
+  end
+  if not popupOfficerNoteEdit:HasFocus() then
+    popupOfficerNoteEdit:SetText(entry.officerNote or "")
+  end
+
+  local canPromote, canDemote = true, true
+  if CanPromote then
+    local ok, result = pcall(CanPromote, entry.name)
+    if ok and result == false then
+      canPromote = false
+    end
+  end
+  if CanDemote then
+    local ok, result = pcall(CanDemote, entry.name)
+    if ok and result == false then
+      canDemote = false
+    end
+  end
+  popupPromoteBtn:SetEnabled(canPromote)
+  popupDemoteBtn:SetEnabled(canDemote)
+end
+
+function Girudo:OpenMemberPopup(name)
+  if not name then
+    return
+  end
+  popup.currentName = name
+
+  popup:ClearAllPoints()
+  popup:SetPoint("TOPLEFT", GirudoFrame, "TOPRIGHT", 8, 0)
+
+  self:RefreshMemberPopup()
+  popup:Show()
+end
+
+popupPublicNoteEdit:SetScript("OnEnterPressed", function(self)
+  self:ClearFocus()
+end)
+popupPublicNoteEdit:SetScript("OnEscapePressed", function(self)
+  self:ClearFocus()
+end)
+-- The InputBoxTemplate's default OnEditFocusGained calls HighlightText(),
+-- which selects the entire string. Removing that handler restores the
+-- built-in click-to-place-cursor behaviour without selecting all.
+popupPublicNoteEdit:SetScript("OnEditFocusGained", function() end)
+popupOfficerNoteEdit:SetScript("OnEditFocusGained", function() end)
+popupPublicNoteEdit:SetScript("OnEditFocusLost", function(self)
+  if not popup.currentName then
+    return
+  end
+  local cache = GirudoDB.playerCache[popup.currentName]
+  local original = (cache and cache.publicNote) or ""
+  if self:GetText() == original then
+    return
+  end
+  local index = FindRosterIndex(popup.currentName)
+  if not index then
+    return
+  end
+  if GuildRosterSetPublicNote then
+    GuildRosterSetPublicNote(index, self:GetText())
+  end
+end)
+
+popupOfficerNoteEdit:SetScript("OnEnterPressed", function(self)
+  self:ClearFocus()
+end)
+popupOfficerNoteEdit:SetScript("OnEscapePressed", function(self)
+  self:ClearFocus()
+end)
+popupOfficerNoteEdit:SetScript("OnEditFocusLost", function(self)
+  if not popup.currentName then
+    return
+  end
+  local cache = GirudoDB.playerCache[popup.currentName]
+  local original = (cache and cache.officerNote) or ""
+  if self:GetText() == original then
+    return
+  end
+  local index = FindRosterIndex(popup.currentName)
+  if not index then
+    return
+  end
+  if GuildRosterSetOfficerNote then
+    GuildRosterSetOfficerNote(index, self:GetText())
+  end
+end)
+
+popupPromoteBtn:SetScript("OnClick", function()
+  if not popup.currentName then
+    return
+  end
+  if PromoteByName then
+    PromoteByName(popup.currentName)
+  end
+end)
+
+popupDemoteBtn:SetScript("OnClick", function()
+  if not popup.currentName then
+    return
+  end
+  if DemoteByName then
+    DemoteByName(popup.currentName)
+  end
+end)
+
+popupWhisperBtn:SetScript("OnClick", function()
+  if not popup.currentName then
+    return
+  end
+  ChatFrame_OpenChat("/w " .. popup.currentName .. " ")
+  popup:Hide()
+end)
+
+popupInviteBtn:SetScript("OnClick", function()
+  if not popup.currentName then
+    return
+  end
+  if InviteUnit then
+    InviteUnit(popup.currentName)
+  end
+end)
+
+popupKickBtn:SetScript("OnClick", function()
+  if not popup.currentName then
+    return
+  end
+  if GuildUninvite then
+    GuildUninvite(popup.currentName)
+  end
+  popup:Hide()
+end)
 
 function Girudo:ScanRoster()
   if not IsInGuild() then
@@ -985,7 +1388,7 @@ function Girudo:UpdateRoster()
 end
 
 -- ===========================================================================
--- 8d. Guild log: persistence, scanning, sorting, rendering
+-- 8e. Guild log: persistence, scanning, sorting, rendering
 -- ===========================================================================
 
 -- WotLK 3.3.5a event types returned by GetGuildEventInfo (0-based).
@@ -1685,6 +2088,9 @@ local function HookGuildFrame()
 
   GuildFrame:HookScript("OnHide", function()
     GirudoFrame:Hide()
+    if GirudoMemberPopup then
+      GirudoMemberPopup:Hide()
+    end
   end)
 
   if GuildFrame:IsShown() then
