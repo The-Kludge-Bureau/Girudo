@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: Girudo
+## Notes: Guild management on wheels
+## Author: txtsd
+## Version: 0.1.0
+## SavedVariables: GirudoDB
+
+Girudo.lua
